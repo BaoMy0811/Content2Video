@@ -9,23 +9,10 @@ import {
 } from 'lucide-react';
 
 const API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
-
-// Tách riêng model cho 3 tác vụ để tránh dùng nhầm model text / image / audio.
+//const MODEL = import.meta.env.VITE_GEMINI_MODEL || "gemini-2.5-flash";
 const TEXT_MODEL = import.meta.env.VITE_GEMINI_TEXT_MODEL || "gemini-2.5-flash";
 const IMAGE_MODEL = import.meta.env.VITE_GEMINI_IMAGE_MODEL || "gemini-3.1-flash-image-preview";
 const TTS_MODEL = import.meta.env.VITE_GEMINI_TTS_MODEL || "gemini-2.5-flash-preview-tts";
-
-const getGeminiUrl = (model) =>
-  `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${API_KEY}`;
-
-const readGeminiError = async (response) => {
-  const data = await response.json().catch(() => null);
-  if (!response.ok) {
-    console.error("Gemini API error:", response.status, data);
-    throw new Error(data?.error?.message || `Gemini API error ${response.status}`);
-  }
-  return data;
-};
 
 
 const TONES = [
@@ -88,56 +75,39 @@ const IMAGE_STYLES = [
 ];
 
 const callGeminiText = async (prompt) => {
-  const response = await fetch(getGeminiUrl(TEXT_MODEL), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${API_KEY}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
   });
-  const result = await readGeminiError(response);
-  return result?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  const result = await response.json();
+  return result.candidates[0].content.parts[0].text;
 };
 
 const callGeminiJSON = async (prompt, schema) => {
-  const response = await fetch(getGeminiUrl(TEXT_MODEL), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${API_KEY}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig: { responseMimeType: "application/json", responseSchema: schema }
     })
   });
-  const result = await readGeminiError(response);
-  const text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error("Gemini không trả về JSON text");
-  return JSON.parse(text);
+  const result = await response.json();
+  return JSON.parse(result.candidates[0].content.parts[0].text);
 };
 
 const callGeminiTTS = async (text, voiceName) => {
-  const response = await fetch(getGeminiUrl(TTS_MODEL), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${API_KEY}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      contents: [{ parts: [{ text }] }],
-      generationConfig: {
-        responseModalities: ["AUDIO"],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName }
-          }
-        }
-      }
+      contents: [{ parts: [{ text: text }] }],
+      generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voiceName } } } },
+      model: "gemini-2.5-flash-preview-tts"
     })
   });
-  const result = await readGeminiError(response);
-  const part = result?.candidates?.[0]?.content?.parts?.find(p => p?.inlineData?.data);
+  const result = await response.json();
+  const part = result?.candidates?.[0]?.content?.parts?.[0];
   if (part?.inlineData?.data) {
-    const mimeType = part.inlineData.mimeType || "audio/wav";
-
-    // Nếu API trả WAV/MP3/OGG thì dùng trực tiếp. Nếu trả PCM thô thì convert sang WAV.
-    if (!mimeType.includes("pcm")) {
-      return `data:${mimeType};base64,${part.inlineData.data}`;
-    }
-
+    const mimeType = part.inlineData.mimeType || "";
     const sampleRate = mimeType.match(/rate=(\d+)/) ? parseInt(mimeType.match(/rate=(\d+)/)[1], 10) : 24000;
     const binaryString = atob(part.inlineData.data);
     const bytes = new Uint8Array(binaryString.length);
@@ -154,25 +124,21 @@ const callGeminiTTS = async (text, voiceName) => {
     for (let i = 0; i < pcm16.length; i++) view.setInt16(44 + i * 2, pcm16[i], true);
     return URL.createObjectURL(new Blob([view], { type: 'audio/wav' }));
   }
-  throw new Error("Gemini không trả về dữ liệu audio");
+  throw new Error("Lỗi Audio");
 };
 
 const callGeminiImage = async (prompt, aspectRatioId) => {
-  const response = await fetch(getGeminiUrl(IMAGE_MODEL), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image-preview:generateContent?key=${API_KEY}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: {
-        responseModalities: ['TEXT', 'IMAGE'],
-        imageConfig: { aspectRatio: aspectRatioId }
-      }
+      generationConfig: { responseModalities: ['IMAGE'], imageConfig: { aspectRatio: aspectRatioId } }
     })
   });
-  const result = await readGeminiError(response);
-  const part = result?.candidates?.[0]?.content?.parts?.find(p => p?.inlineData?.data);
-  if (part?.inlineData?.data) return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-  throw new Error("Gemini không trả về dữ liệu ảnh");
+  const result = await response.json();
+  const part = result?.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+  if (part) return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+  throw new Error("Lỗi Image");
 };
 
 export default function App() {
