@@ -249,99 +249,216 @@ const callGeminiTTS = async (text, voiceName) => {
 
   throw new Error("Gemini không trả về dữ liệu audio");
 };
-/*
-const callGeminiImage = async (prompt, aspectRatioId) => {
-  const payload = {
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: {
-      responseModalities: ["TEXT", "IMAGE"],
-      imageConfig: { aspectRatio: aspectRatioId },
-    },
+
+const normalizeAspectRatio = (aspectRatioId) => {
+  const allowed = ["1:1", "9:16", "16:9", "4:3", "3:4", "3:2", "2:3", "5:4", "4:5", "21:9"];
+  return allowed.includes(aspectRatioId) ? aspectRatioId : "16:9";
+};
+
+const extractImageData = (data) => {
+  if (!data || typeof data !== "object") return null;
+
+  // Interactions API convenience shape
+  if (data.output_image?.data) {
+    return {
+      data: data.output_image.data,
+      mimeType: data.output_image.mime_type || data.output_image.mimeType || "image/png",
+    };
+  }
+
+  // Imagen predict REST shape
+  const prediction = data.predictions?.[0];
+  if (prediction) {
+    const base64 =
+      prediction.bytesBase64Encoded ||
+      prediction.image?.bytesBase64Encoded ||
+      prediction.image?.imageBytes ||
+      prediction.generatedImage?.image?.imageBytes;
+
+    if (base64) {
+      return {
+        data: base64,
+        mimeType: prediction.mimeType || prediction.image?.mimeType || "image/png",
+      };
+    }
+  }
+
+  // generateContent / Nano Banana older shape
+  const part = data.candidates?.[0]?.content?.parts?.find((p) => p?.inlineData?.data);
+  if (part?.inlineData?.data) {
+    return {
+      data: part.inlineData.data,
+      mimeType: part.inlineData.mimeType || "image/png",
+    };
+  }
+
+  // Deep fallback: scan nested response for common image fields
+  const seen = new Set();
+  const scan = (obj) => {
+    if (!obj || typeof obj !== "object" || seen.has(obj)) return null;
+    seen.add(obj);
+
+    if (obj.inlineData?.data) {
+      return { data: obj.inlineData.data, mimeType: obj.inlineData.mimeType || "image/png" };
+    }
+
+    if (obj.data && (obj.mime_type || obj.mimeType || obj.type === "image")) {
+      return { data: obj.data, mimeType: obj.mime_type || obj.mimeType || "image/png" };
+    }
+
+    if (obj.bytesBase64Encoded) {
+      return { data: obj.bytesBase64Encoded, mimeType: obj.mimeType || "image/png" };
+    }
+
+    if (obj.imageBytes) {
+      return { data: obj.imageBytes, mimeType: obj.mimeType || "image/png" };
+    }
+
+    for (const value of Object.values(obj)) {
+      const found = scan(value);
+      if (found) return found;
+    }
+
+    return null;
   };
-*/
-const generateImage = async (prompt: string) => {
-const imageModels = [
-"imagen-4.0-fast-generate-001",
-"imagen-4.0-generate-001",
-"gemini-2.5-flash-image"
-];
 
-let lastError = null;
+  return scan(data);
+};
 
-for (const model of imageModels) {
-try {
-console.log(`Đang thử model: ${model}`);
+const fetchGeminiJson = async (url, payload, taskName, modelName, extraHeaders = {}, maxRetries = 3) => {
+  if (!API_KEY) {
+    throw new Error("Thiếu VITE_GEMINI_API_KEY. Hãy thêm API key trong .env hoặc Netlify Environment variables.");
+  }
 
-```
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${API_KEY}`,
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...extraHeaders,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      return await parseGeminiResponse(response, taskName, modelName);
+    } catch (error) {
+      lastError = error;
+
+      if ((error.status === 503 || error.status === 429) && attempt < maxRetries) {
+        const waitMs = attempt * 1500;
+        console.warn(`${taskName}: ${modelName} lỗi ${error.status}. Thử lại sau ${waitMs}ms...`);
+        await sleep(waitMs);
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  throw lastError;
+};
+
+const callImagenImage = async (modelName, prompt, aspectRatioId) => {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:predict`;
+
+  const result = await fetchGeminiJson(
+    url,
     {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
+      instances: [{ prompt }],
+      parameters: {
+        sampleCount: 1,
+        aspectRatio: normalizeAspectRatio(aspectRatioId),
       },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              {
-                text: prompt,
-              },
-            ],
-          },
-        ],
-      }),
+    },
+    "IMAGE_IMAGEN",
+    modelName,
+    { "x-goog-api-key": API_KEY }
+  );
+
+  const image = extractImageData(result);
+  if (!image?.data) throw new Error(`Model ${modelName} không trả về dữ liệu ảnh`);
+
+  return `data:${image.mimeType};base64,${image.data}`;
+};
+
+const callGeminiNativeImage = async (modelName, prompt, aspectRatioId) => {
+  // API mới cho Nano Banana / Gemini Image models.
+  const result = await fetchGeminiJson(
+    "https://generativelanguage.googleapis.com/v1beta/interactions",
+    {
+      model: modelName,
+      input: prompt,
+      response_format: {
+        type: "image",
+        mime_type: "image/png",
+        aspect_ratio: normalizeAspectRatio(aspectRatioId),
+      },
+    },
+    "IMAGE_GEMINI",
+    modelName,
+    {
+      "x-goog-api-key": API_KEY,
+      "Api-Revision": "2026-05-20",
     }
   );
 
-  const data = await response.json();
+  const image = extractImageData(result);
+  if (!image?.data) throw new Error(`Model ${modelName} không trả về dữ liệu ảnh`);
 
-  if (!response.ok) {
-    throw new Error(
-      data?.error?.message || `HTTP ${response.status}`
-    );
-  }
-
-  console.log(`Thành công với model ${model}`);
-  return data;
-} catch (error) {
-  console.error(`Model ${model} thất bại:`, error);
-  lastError = error;
-}
-```
-
-}
-
-throw new Error(
-`Không thể tạo ảnh. Tất cả model đều thất bại. Lỗi cuối: ${lastError}`
-);
+  return `data:${image.mimeType};base64,${image.data}`;
 };
 
+const callGeminiImageLegacy = async (modelName, prompt, aspectRatioId) => {
+  // Fallback cho một số project vẫn dùng generateContent với Gemini 2.5 Flash Image.
+  const result = await callGeminiEndpoint(
+    modelName,
+    {
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: {
+        responseModalities: ["TEXT", "IMAGE"],
+        imageConfig: { aspectRatio: normalizeAspectRatio(aspectRatioId) },
+      },
+    },
+    "IMAGE_LEGACY"
+  );
 
+  const image = extractImageData(result);
+  if (!image?.data) throw new Error(`Model ${modelName} không trả về dữ liệu ảnh`);
 
+  return `data:${image.mimeType};base64,${image.data}`;
+};
+
+const callGeminiImage = async (prompt, aspectRatioId) => {
   let lastError = null;
 
   for (const modelName of IMAGE_MODELS) {
     try {
-      const result = await callGeminiEndpoint(modelName, payload, "IMAGE");
-      const part = result?.candidates?.[0]?.content?.parts?.find((p) => p?.inlineData?.data);
+      console.log(`Đang tạo ảnh bằng model: ${modelName}`);
 
-      if (part?.inlineData?.data) {
-        return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+      if (modelName.startsWith("imagen-")) {
+        return await callImagenImage(modelName, prompt, aspectRatioId);
       }
 
-      throw new Error(`Model ${modelName} không trả về dữ liệu ảnh`);
+      try {
+        return await callGeminiNativeImage(modelName, prompt, aspectRatioId);
+      } catch (nativeError) {
+        console.warn(`Interactions API thất bại với ${modelName}, thử generateContent legacy...`, nativeError?.message || nativeError);
+        return await callGeminiImageLegacy(modelName, prompt, aspectRatioId);
+      }
     } catch (error) {
       lastError = error;
       console.warn(`IMAGE model ${modelName} failed:`, error?.message || error);
-
-      // Nếu model hiện tại lỗi 503/429/404/400, thử model tiếp theo trong IMAGE_MODELS.
-      // Nếu chỉ khai báo 1 model trong env thì vẫn có fallback gemini-2.5-flash-image phía trên.
       continue;
     }
   }
 
-  throw lastError || new Error("Không tạo được ảnh bằng các image model hiện có");
+  const msg = lastError?.message || "Không tạo được ảnh bằng các image model hiện có";
+  throw new Error(
+    `Không thể tạo ảnh. Có thể do model không được cấp quyền, chưa bật billing, hoặc hết quota. Lỗi cuối: ${msg}`
+  );
 };
 
 export default function App() {
