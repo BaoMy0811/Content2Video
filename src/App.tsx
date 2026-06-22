@@ -249,7 +249,7 @@ const callGeminiTTS = async (text, voiceName) => {
 
   throw new Error("Gemini không trả về dữ liệu audio");
 };
-
+/*
 const callGeminiImage = async (prompt, aspectRatioId) => {
   const payload = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
@@ -258,6 +258,66 @@ const callGeminiImage = async (prompt, aspectRatioId) => {
       imageConfig: { aspectRatio: aspectRatioId },
     },
   };
+*/
+const generateImage = async (prompt: string) => {
+const imageModels = [
+"imagen-4.0-fast-generate-001",
+"imagen-4.0-generate-001",
+"gemini-2.5-flash-image"
+];
+
+let lastError = null;
+
+for (const model of imageModels) {
+try {
+console.log(`Đang thử model: ${model}`);
+
+```
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${API_KEY}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              {
+                text: prompt,
+              },
+            ],
+          },
+        ],
+      }),
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(
+      data?.error?.message || `HTTP ${response.status}`
+    );
+  }
+
+  console.log(`Thành công với model ${model}`);
+  return data;
+} catch (error) {
+  console.error(`Model ${model} thất bại:`, error);
+  lastError = error;
+}
+```
+
+}
+
+throw new Error(
+`Không thể tạo ảnh. Tất cả model đều thất bại. Lỗi cuối: ${lastError}`
+);
+};
+
+
 
   let lastError = null;
 
@@ -613,9 +673,13 @@ ${storyText}`;
       const imageUrl = await callGeminiImage(optimizedPrompt, videoSettings.aspectRatio);
       setSceneAssets(prev => ({ ...prev, [sceneId]: { ...prev[sceneId], imageUrl, isLoadingImage: false } }));
     } catch (error) {
-      setSceneAssets(prev => ({ ...prev, [sceneId]: { ...prev[sceneId], isLoadingImage: false } }));
-      showError(`Lỗi tạo Ảnh cảnh ${sceneId}`);
-    }
+  console.error("Create image failed:", error);
+  setSceneAssets(prev => ({
+    ...prev,
+    [sceneId]: { ...prev[sceneId], isLoadingImage: false }
+  }));
+  showError("Không thể tạo ảnh. Có thể do hết quota hoặc model ảnh đang lỗi.");
+}
   };
 
   const handleBatchGenerate = async (forceRecreate = false) => {
