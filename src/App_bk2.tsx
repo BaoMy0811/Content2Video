@@ -11,95 +11,20 @@ import {
 const API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 
 // Tách riêng model cho 3 tác vụ để tránh dùng nhầm model text / image / audio.
-// IMAGE_MODEL có thể khai báo 1 model hoặc nhiều model, ngăn cách bằng dấu phẩy.
-// Ví dụ: VITE_GEMINI_IMAGE_MODEL=gemini-3.1-flash-image-preview,gemini-2.5-flash-image
 const TEXT_MODEL = import.meta.env.VITE_GEMINI_TEXT_MODEL || "gemini-2.5-flash";
-const IMAGE_MODEL = import.meta.env.VITE_GEMINI_IMAGE_MODEL || "gemini-3.1-flash-image-preview,gemini-2.5-flash-image";
+const IMAGE_MODEL = import.meta.env.VITE_GEMINI_IMAGE_MODEL || "gemini-3.1-flash-image-preview";
 const TTS_MODEL = import.meta.env.VITE_GEMINI_TTS_MODEL || "gemini-2.5-flash-preview-tts";
-
-const IMAGE_MODELS = Array.from(
-  new Set(
-    IMAGE_MODEL
-      .split(",")
-      .map((m) => m.trim())
-      .filter(Boolean)
-      .concat(["gemini-2.5-flash-image"])
-  )
-);
 
 const getGeminiUrl = (model) =>
   `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${API_KEY}`;
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-const parseGeminiResponse = async (response, taskName, modelName) => {
-  const rawText = await response.text();
-  let data = null;
-
-  try {
-    data = rawText ? JSON.parse(rawText) : null;
-  } catch (_) {
-    data = { rawText };
-  }
-
+const readGeminiError = async (response) => {
+  const data = await response.json().catch(() => null);
   if (!response.ok) {
-    const message =
-      data?.error?.message ||
-      data?.message ||
-      rawText ||
-      `Gemini API error ${response.status}`;
-
-    console.error("Gemini API ERROR:", {
-      task: taskName,
-      model: modelName,
-      status: response.status,
-      statusText: response.statusText,
-      message,
-      fullResponse: data,
-    });
-
-    const err = new Error(`[${taskName}] ${response.status} ${response.statusText}: ${message}`);
-    err.status = response.status;
-    err.model = modelName;
-    err.fullResponse = data;
-    throw err;
+    console.error("Gemini API error:", response.status, data);
+    throw new Error(data?.error?.message || `Gemini API error ${response.status}`);
   }
-
   return data;
-};
-
-const callGeminiEndpoint = async (modelName, payload, taskName, maxRetries = 3) => {
-  if (!API_KEY) {
-    throw new Error("Thiếu VITE_GEMINI_API_KEY. Hãy thêm API key trong .env hoặc Netlify Environment variables.");
-  }
-
-  let lastError = null;
-
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const response = await fetch(getGeminiUrl(modelName), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      return await parseGeminiResponse(response, taskName, modelName);
-    } catch (error) {
-      lastError = error;
-
-      // 503: model quá tải / tạm unavailable. 429: rate limit. Thử lại vài lần.
-      if ((error.status === 503 || error.status === 429) && attempt < maxRetries) {
-        const waitMs = attempt * 1500;
-        console.warn(`${taskName}: ${modelName} lỗi ${error.status}. Thử lại sau ${waitMs}ms...`);
-        await sleep(waitMs);
-        continue;
-      }
-
-      throw error;
-    }
-  }
-
-  throw lastError;
 };
 
 
@@ -163,50 +88,48 @@ const IMAGE_STYLES = [
 ];
 
 const callGeminiText = async (prompt) => {
-  const result = await callGeminiEndpoint(
-    TEXT_MODEL,
-    { contents: [{ parts: [{ text: prompt }] }] },
-    "TEXT"
-  );
-
+  const response = await fetch(getGeminiUrl(TEXT_MODEL), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+  });
+  const result = await readGeminiError(response);
   return result?.candidates?.[0]?.content?.parts?.[0]?.text || "";
 };
 
 const callGeminiJSON = async (prompt, schema) => {
-  const result = await callGeminiEndpoint(
-    TEXT_MODEL,
-    {
+  const response = await fetch(getGeminiUrl(TEXT_MODEL), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { responseMimeType: "application/json", responseSchema: schema },
-    },
-    "JSON"
-  );
-
+      generationConfig: { responseMimeType: "application/json", responseSchema: schema }
+    })
+  });
+  const result = await readGeminiError(response);
   const text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) throw new Error("Gemini không trả về JSON text");
-
   return JSON.parse(text);
 };
 
 const callGeminiTTS = async (text, voiceName) => {
-  const result = await callGeminiEndpoint(
-    TTS_MODEL,
-    {
+  const response = await fetch(getGeminiUrl(TTS_MODEL), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
       contents: [{ parts: [{ text }] }],
       generationConfig: {
         responseModalities: ["AUDIO"],
         speechConfig: {
           voiceConfig: {
-            prebuiltVoiceConfig: { voiceName },
-          },
-        },
-      },
-    },
-    "TTS"
-  );
-
-  const part = result?.candidates?.[0]?.content?.parts?.find((p) => p?.inlineData?.data);
-
+            prebuiltVoiceConfig: { voiceName }
+          }
+        }
+      }
+    })
+  });
+  const result = await readGeminiError(response);
+  const part = result?.candidates?.[0]?.content?.parts?.find(p => p?.inlineData?.data);
   if (part?.inlineData?.data) {
     const mimeType = part.inlineData.mimeType || "audio/wav";
 
@@ -218,70 +141,38 @@ const callGeminiTTS = async (text, voiceName) => {
     const sampleRate = mimeType.match(/rate=(\d+)/) ? parseInt(mimeType.match(/rate=(\d+)/)[1], 10) : 24000;
     const binaryString = atob(part.inlineData.data);
     const bytes = new Uint8Array(binaryString.length);
-
     for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
-
     const pcm16 = new Int16Array(bytes.buffer);
     const wavBuffer = new ArrayBuffer(44 + pcm16.length * 2);
     const view = new DataView(wavBuffer);
-    const writeString = (v, offset, str) => {
-      for (let i = 0; i < str.length; i++) v.setUint8(offset + i, str.charCodeAt(i));
-    };
-
-    writeString(view, 0, "RIFF");
-    view.setUint32(4, 36 + pcm16.length * 2, true);
-    writeString(view, 8, "WAVE");
-    writeString(view, 12, "fmt ");
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    writeString(view, 36, "data");
-    view.setUint32(40, pcm16.length * 2, true);
-
+    const writeString = (v, offset, str) => { for(let i=0; i<str.length; i++) v.setUint8(offset + i, str.charCodeAt(i)); };
+    writeString(view, 0, 'RIFF'); view.setUint32(4, 36 + pcm16.length * 2, true);
+    writeString(view, 8, 'WAVE'); writeString(view, 12, 'fmt '); view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); view.setUint16(22, 1, true); view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+    writeString(view, 36, 'data'); view.setUint32(40, pcm16.length * 2, true);
     for (let i = 0; i < pcm16.length; i++) view.setInt16(44 + i * 2, pcm16[i], true);
-
-    return URL.createObjectURL(new Blob([view], { type: "audio/wav" }));
+    return URL.createObjectURL(new Blob([view], { type: 'audio/wav' }));
   }
-
   throw new Error("Gemini không trả về dữ liệu audio");
 };
 
 const callGeminiImage = async (prompt, aspectRatioId) => {
-  const payload = {
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: {
-      responseModalities: ["TEXT", "IMAGE"],
-      imageConfig: { aspectRatio: aspectRatioId },
-    },
-  };
-
-  let lastError = null;
-
-  for (const modelName of IMAGE_MODELS) {
-    try {
-      const result = await callGeminiEndpoint(modelName, payload, "IMAGE");
-      const part = result?.candidates?.[0]?.content?.parts?.find((p) => p?.inlineData?.data);
-
-      if (part?.inlineData?.data) {
-        return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+  const response = await fetch(getGeminiUrl(IMAGE_MODEL), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: {
+        responseModalities: ['TEXT', 'IMAGE'],
+        imageConfig: { aspectRatio: aspectRatioId }
       }
-
-      throw new Error(`Model ${modelName} không trả về dữ liệu ảnh`);
-    } catch (error) {
-      lastError = error;
-      console.warn(`IMAGE model ${modelName} failed:`, error?.message || error);
-
-      // Nếu model hiện tại lỗi 503/429/404/400, thử model tiếp theo trong IMAGE_MODELS.
-      // Nếu chỉ khai báo 1 model trong env thì vẫn có fallback gemini-2.5-flash-image phía trên.
-      continue;
-    }
-  }
-
-  throw lastError || new Error("Không tạo được ảnh bằng các image model hiện có");
+    })
+  });
+  const result = await readGeminiError(response);
+  const part = result?.candidates?.[0]?.content?.parts?.find(p => p?.inlineData?.data);
+  if (part?.inlineData?.data) return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+  throw new Error("Gemini không trả về dữ liệu ảnh");
 };
 
 export default function App() {
